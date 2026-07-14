@@ -1,0 +1,20 @@
+[project]
+name = "veritas-plane-tma-backend"
+version = "0.1.0"
+description = "Auth backend for the Veritas Plane Telegram Mini App (TLV-2679)"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi==0.139.0",
+    "uvicorn[standard]==0.51.0",
+    "pydantic==2.13.4",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==9.1.1",
+    "httpx==0.28.1",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
