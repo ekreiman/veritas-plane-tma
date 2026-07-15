@@ -1,15 +1,37 @@
-// Scaffold entry point. Wires the Telegram theme + auth handshake; the
-// actual Plane-backed views (issue list, task detail, comments) are NOT
-// built yet — this is the starting skeleton, not a working app.
+// Routing shell (TLV-2681). Auth handshake -> authed shell -> 5-view
+// stack (issue list -> detail -> compose/state-picker/label-picker).
+// Telegram BackButton drives back-navigation; hash routing/React Router
+// deliberately skipped — the flow is strictly linear and TMAs aren't
+// bookmarked by URL (ARCHITECTURE.md §6 non-goals).
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { applyTelegramTheme, watchTelegramTheme } from './telegram/theme';
+import { useBackButton } from './telegram/useTelegramButtons';
+import { performTelegramLogin, NotInTelegramError } from './api/auth';
+import { AuthInvalidError, NoIdentityError } from './api/errors';
+import { getDisplayName, isSessionValid } from './api/session';
+import { useNavigation, currentScreen } from './store/navigation';
+import type { PlaneIssue } from './api/types';
+import { IssueListView } from './views/IssueListView';
+import { IssueDetailView } from './views/IssueDetailView';
+import { CommentComposeView } from './views/CommentComposeView';
+import { StatePickerView } from './views/StatePickerView';
+import { LabelPickerView } from './views/LabelPickerView';
 
 type AuthState = 'checking' | 'authed' | 'error' | 'not-telegram';
 
 export default function App() {
   const [authState, setAuthState] = useState<AuthState>('checking');
-  const [error, setError] = useState<string | null>(null);
+  const [authError, setAuthError] = useState<unknown>(null);
+  const [displayName, setDisplayName] = useState<string | null>(null);
+
+  // Cache of loaded issues by id — lets the state/label picker views
+  // read the issue's current state/labels without re-fetching (the
+  // detail view reports what it loaded via onIssueLoaded).
+  const [issueCache, setIssueCache] = useState<Record<string, PlaneIssue>>({});
+
+  const { stack, push, pop } = useNavigation();
+  const screen = currentScreen(stack);
 
   useEffect(() => {
     const wa = window.Telegram?.WebApp;
@@ -21,27 +43,22 @@ export default function App() {
     const unwatch = watchTelegramTheme();
 
     async function authenticate() {
-      if (!wa || !wa.initData) {
-        setAuthState('not-telegram');
+      if (isSessionValid()) {
+        setDisplayName(getDisplayName());
+        setAuthState('authed');
         return;
       }
       try {
-        // TODO: POST wa.initData to the backend once it exists. The backend
-        // should: 1) validate_init_data() (see auth/telegram_init_data.py),
-        // 2) resolve_plane_identity() (see auth/telegram_user_map.py),
-        // 3) return a short-lived session the frontend uses for subsequent
-        // Plane-proxy calls. No such backend endpoint exists yet.
-        const res = await fetch('/auth/telegram-login', {
-          method: 'POST',
-          credentials: 'include',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ initData: wa.initData }),
-        });
-        if (!res.ok) throw new Error(`auth failed (${res.status})`);
+        const result = await performTelegramLogin();
+        setDisplayName(result.display_name);
         setAuthState('authed');
       } catch (e) {
-        setError(e instanceof Error ? e.message : 'Login failed');
-        setAuthState('error');
+        if (e instanceof NotInTelegramError) {
+          setAuthState('not-telegram');
+        } else {
+          setAuthError(e);
+          setAuthState('error');
+        }
       }
     }
 
@@ -49,29 +66,93 @@ export default function App() {
     return () => unwatch();
   }, []);
 
+  const goBack = useCallback(() => pop(), [pop]);
+  useBackButton(stack.length > 1, goBack);
+
+  function retryAuth() {
+    setAuthState('checking');
+    setAuthError(null);
+    performTelegramLogin()
+      .then((result) => {
+        setDisplayName(result.display_name);
+        setAuthState('authed');
+      })
+      .catch((e) => {
+        setAuthError(e);
+        setAuthState('error');
+      });
+  }
+
   if (authState === 'checking') {
-    return <div className="p-4 text-tg-hint">Signing in…</div>;
+    return <div className="p-4 text-sm text-tg-hint">Signing in…</div>;
   }
   if (authState === 'not-telegram') {
     return (
-      <div className="p-4 text-tg-destructive">
+      <div className="p-4 text-sm text-tg-destructive">
         This app must be opened from inside Telegram.
       </div>
     );
   }
   if (authState === 'error') {
-    return <div className="p-4 text-tg-destructive">Sign-in failed: {error}</div>;
+    const message =
+      authError instanceof NoIdentityError
+        ? "You don't have a Plane account linked yet. Ask Ed or Werner to set one up."
+        : authError instanceof AuthInvalidError
+          ? 'Sign-in failed — your Telegram session could not be verified.'
+          : authError instanceof Error
+            ? authError.message
+            : 'Sign-in failed.';
+    return (
+      <div className="flex min-h-screen flex-col items-center justify-center gap-3 p-4 text-center">
+        <p className="text-sm text-tg-destructive">{message}</p>
+        <button
+          type="button"
+          onClick={retryAuth}
+          className="min-h-[44px] rounded-lg bg-tg-secondary-bg px-4 text-sm font-medium text-tg-text"
+        >
+          Retry
+        </button>
+      </div>
+    );
   }
 
   return (
-    <div className="p-4">
-      <h1 className="text-lg font-semibold text-tg-text">Veritas — Plane</h1>
-      <p className="text-tg-hint">
-        Authenticated. Plane-backed views (issue list, task detail, comments)
-        are not built yet — this scaffold only proves the auth handshake
-        reaches a backend. Next: build the backend endpoint this calls, plus
-        the actual Plane API proxy views.
-      </p>
+    <div className="min-h-screen bg-tg-bg" title={displayName ?? undefined}>
+      {screen.name === 'issue-list' && (
+        <IssueListView onOpenIssue={(issueId) => push({ name: 'issue-detail', issueId })} />
+      )}
+
+      {screen.name === 'issue-detail' && (
+        <IssueDetailView
+          issueId={screen.issueId}
+          onIssueLoaded={(issue) =>
+            setIssueCache((prev) => ({ ...prev, [issue.id]: issue }))
+          }
+          onComposeComment={() => push({ name: 'comment-compose', issueId: screen.issueId })}
+          onEditState={() => push({ name: 'state-picker', issueId: screen.issueId })}
+          onEditLabels={() => push({ name: 'label-picker', issueId: screen.issueId })}
+        />
+      )}
+
+      {screen.name === 'comment-compose' && (
+        <CommentComposeView issueId={screen.issueId} onDone={goBack} />
+      )}
+
+      {screen.name === 'state-picker' && (
+        <StatePickerView
+          issueId={screen.issueId}
+          currentStateId={issueCache[screen.issueId]?.state ?? ''}
+          onDone={goBack}
+        />
+      )}
+
+      {screen.name === 'label-picker' && (
+        <LabelPickerView
+          issueId={screen.issueId}
+          currentLabelIds={issueCache[screen.issueId]?.labels ?? []}
+          onDone={goBack}
+        />
+      )}
     </div>
   );
 }
