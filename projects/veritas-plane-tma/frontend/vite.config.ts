@@ -1,12 +1,13 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 
-// Build output is served at /tma/ by whatever reverse proxy fronts the
-// backend that talks to Plane's API (TBD — Kai's original Caddy config
-// was written against a different, now-retired upstream and needs a
-// fresh Caddyfile pointed at this app's own backend, not Plane directly).
+// Build output is served at the site root by Kai's Caddy config
+// (TLV-2682 runbook: `/` and static assets from
+// `/srv/veritas-plane-tma/frontend/dist`, SPA fallback to `/index.html`,
+// `/api/*` and `/auth/*` proxied to FastAPI on 127.0.0.1:8081). Root
+// base path (not `/tma/`) matches that routing exactly.
 export default defineConfig({
-  base: '/tma/',
+  base: '/',
   plugins: [react()],
   build: {
     outDir: 'dist',
@@ -20,11 +21,12 @@ export default defineConfig({
     },
   },
   server: {
-    // Local dev proxy — points at whatever backend service ends up
-    // brokering initData validation -> Plane identity -> Plane API calls.
+    // Local dev proxy — mirrors the TLV-2682 production routing (FastAPI
+    // on 127.0.0.1:8081) so `npm run dev` behaves the same as the deployed
+    // Caddy setup.
     proxy: {
-      '/api': { target: 'http://localhost:8080', changeOrigin: true },
-      '/auth': { target: 'http://localhost:8080', changeOrigin: true },
+      '/api': { target: 'http://localhost:8081', changeOrigin: true },
+      '/auth': { target: 'http://localhost:8081', changeOrigin: true },
     },
   },
 });
